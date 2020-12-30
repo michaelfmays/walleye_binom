@@ -1,0 +1,689 @@
+---
+title: "A Binomial Prediction Model of Wisconsin Ceded Territory Walleye Population Sustainability"
+author: "Michael Mays"
+date: "Originally prepared: May 2020"
+output:
+  bookdown::html_document2:
+    fig_caption: yes
+    number_sections: false
+    toc: true
+  fontsize: 11pt
+  documentclass: article
+  extra_dependencies: ["booktabs", "floatrow", "amsmath", "hyperref", "xcolor"]
+indent: true
+bibliography: "w_b.bib"
+biblio-style: "apalike"
+in-header:
+  - \usepackage{mathtools}
+  - \usepackage{textcomp}
+  - \usepackage{booktabs}
+  - \usepackage{apacite}
+  - \usepackage{natbib}
+  - \usepackage[hidelinks]{hyperref}
+  - \hypersetup{breaklinks=true}
+  - \usepackage{multirow}
+  - \usepackage{float}
+  - \usepackage{caption}
+  - \usepackage{subfig}
+  - \usepackage{graphicx}
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = F, message=F,
+                      warning=F, fig.width=10,
+                      fig.height=7,
+                      out.width="\\linewidth")
+
+# Always helpful libraries
+library(tidyverse)
+library(broom)
+library(knitr)
+library(car)
+
+# Model fitting & diagnostics libraries
+library(lme4)
+library(lmerTest)
+library(MASS)
+library(optimx)
+library(DHARMa)
+
+# For ROC functions and createFolds function
+library(pROC)
+library(caret)
+
+# For ks.test()
+library(dgof)
+
+# Plotting & table libraries
+library(sjPlot)
+library(cowplot)
+library(kableExtra)
+
+source("helper_functions.R")
+
+theme_general <- theme(panel.background = 
+                         element_rect(fill="white"),
+                       plot.background = 
+                         element_rect(fill="white"),
+                       panel.grid.major.x = element_blank(),
+                       panel.grid.minor.x = element_blank(),
+                       panel.grid.major.y = 
+                         element_line(color = "gray80"),
+                       panel.grid.minor.y =
+                         element_line(color = "gray80",
+                                      linetype="dotted"),
+                       axis.ticks = element_blank(),
+                       legend.position = "right",
+                       legend.background =
+                         element_rect(fill="white"),
+                       legend.text=element_text(size=16),
+                       legend.title=element_text(size=16),
+                       plot.title = element_text(size = 16,
+                                                 face = "bold",
+                                                 hjust = 0.5),
+                       plot.subtitle = element_text(hjust = 0.5),
+                       axis.title.y =
+                         element_text(size=16,
+                                      margin=margin(0,10,0,0)),
+                       axis.title.x =
+                         element_text(size=16,
+                                      margin=margin(10,0,0,0)),
+                       axis.text.y = element_text(size=13),
+                       axis.text.x = element_text(size=13),
+                       strip.text.y = 
+                         element_text(size = 15))
+
+
+```
+
+```{r data, echo=F, message=F, include=F, cache=T}
+fish <- read_csv("fish.csv") %>%
+    drop_na() %>%
+  mutate(
+    wbic = as.factor(wbic), # Convert characters to factors
+    lake_type = as.factor(lake_type),
+    clarity = as.factor(clarity),
+    yoy_per_acre = yoy_catch/size_acre,
+    yoy_per_km = yoy_per_meter*1000, # Convert m to km
+    recruit_yoy = ifelse(yoy_per_km>6.2, 1, 0), # Success binary
+    recruit_yoy = as.factor(recruit_yoy), # Make success a factor
+    temp_survey_c = ((temp_survey-32)*(5/9)) # F to C
+  ) %>% 
+  filter(year >= 1996,
+         year != c(1997:1999),
+    clarity!="Very Low", # Remove one "Very Low" clarity obs
+         wbic!=2294900#, # Remove TURTLE-FLAMBEAU FL because it is
+                         # an outlier
+         )
+```
+
+```{r binom FE, echo=F, message=F, include=F}
+
+fish_sc <- fish %>%
+  mutate(log_km_surv = log(meters_surv/1000),
+         f_year = as.factor(year),
+         s_year = year-(min(year))+1) %>%
+  mutate_at(.vars=c("temp_survey",
+                    "gdd_wtr_5c"), .funs = scale)
+
+b <- glm(recruit_yoy~
+             I(s_year)+I(s_year^2)+
+             log(size_acre)+
+             temp_survey+
+             max_depth_m+
+             lake_type*
+             Secchi_satellite+
+             Conductance,
+    data=fish_sc, family = binomial(link="logit"),
+    contrasts =list(lake_type=c('contr.sum','contr.poly')))
+
+summary(b)
+
+testDispersion(b)
+
+simulationOutput1 <- simulateResiduals(b)
+
+plot(simulationOutput1)
+
+testResiduals(simulationOutput1)
+
+testQuantiles(simulationOutput1)
+
+plotResiduals(simulationOutput1, fish$temp_survey)
+
+rb <- recalculateResiduals(simulationOutput1, group=fish_sc$s_year)
+testTemporalAutocorrelation(rb, time=unique(fish_sc$s_year))
+
+```
+
+```{r binom both RE, echo=F, message=F, include=F}
+
+ft <- fish %>%
+  mutate(size_acre=log(size_acre),
+         f_year = as.factor(year),
+         s_year = (year-(min(year))+1)) %>%
+  mutate_at(.vars=c("temp_survey"), .funs = scale)
+
+b2 <- glmer(recruit_yoy~
+             I(s_year)+I(s_year^2)+
+             size_acre+
+             temp_survey+
+        #(1|f_year)+
+        (1|wbic), 
+      data=ft, nAGQ=0,
+      family = binomial(link="logit"), 
+      control = glmerControl(optimizer ='optimx',
+                optCtrl=list(method='L-BFGS-B')))
+
+testDispersion(b2)
+
+simulationOutput2 <- simulateResiduals(b2)
+
+plot(simulationOutput2)
+
+testResiduals(simulationOutput2)
+
+testQuantiles(simulationOutput2)
+
+plotResiduals(simulationOutput2)
+
+summary(b2)
+
+r2b <- recalculateResiduals(simulationOutput2, group=ft$s_year)
+testTemporalAutocorrelation(r2b, time=unique(ft$s_year))
+
+```
+
+```{r roc, eval=F, cache=T, echo=F, message=F, include=F}
+
+v_me <- model.valid.me(data.re=ft,
+                       fit.re=b2,
+                       data.fe=fish_sc,
+                       fit.fe=b,
+                       B=1000,
+                       seed=40)
+
+save(v_me, file="data.Rdata")
+
+```
+
+```{r roc plots, cache=T, echo=F, message=F, include=F}
+
+load(file="data.Rdata")
+
+test_tibble <- v_me[["test_tibble"]]
+roc_tibble <- v_me[["roc_tibble"]]
+auc_tibble <- v_me[["auc_tibble"]]
+one_test_tibble <- v_me[["one_test_tibble"]]
+
+baseline <- sum(as.numeric(as.character(ft$recruit_yoy)))/
+  length(ft$recruit_yoy)
+
+# ks.test() - test whether p-values are uniformly distributed
+# One-ROC
+ks.train.me <- one_test_tibble %>%
+  dplyr::filter(train_or_test=="train",
+                ME_or_FE=="ME") %>%
+  dplyr::select(p.value) %>%
+ks.test("punif", alternative = "g") %>% 
+  tidy() %>%
+  add_column(train_or_test="train",
+                ME_or_FE="ME")
+
+ks.train.fe <- one_test_tibble %>%
+  dplyr::filter(train_or_test=="train",
+                ME_or_FE=="FE") %>%
+  dplyr::select(p.value) %>%
+ks.test("punif", alternative = "g") %>% 
+  tidy() %>%
+  add_column(train_or_test="train",
+                ME_or_FE="FE")
+
+ks.test.me <- one_test_tibble %>%
+  dplyr::filter(train_or_test=="test",
+                ME_or_FE=="ME") %>%
+  dplyr::select(p.value) %>%
+ks.test("punif", alternative = "g") %>% 
+  tidy() %>%
+  add_column(train_or_test="test",
+                ME_or_FE="ME")
+
+ks.test.fe <- one_test_tibble %>%
+  dplyr::filter(train_or_test=="test",
+                ME_or_FE=="FE") %>%
+  dplyr::select(p.value) %>%
+ks.test("punif", alternative = "g") %>% 
+  tidy() %>%
+  add_column(train_or_test="test",
+                ME_or_FE="FE")
+
+ks.tibble <- rbind(ks.train.me, ks.train.fe,
+                   ks.test.me, ks.test.fe) %>%
+  dplyr::select(-method, -alternative) %>%
+  dplyr::mutate(ME_or_FE = dplyr::recode(ME_or_FE,
+                           ME="Mixed",
+                           FE="Fixed"),
+         train_or_test = dplyr::recode(train_or_test,
+                                       train="Train",
+                                       test="Test")) %>%
+  dplyr::rename("Test Statistic" = statistic,
+                "P-value" = p.value,
+                "Data"=train_or_test,
+                "Model"=ME_or_FE)
+
+# ks.test() - test whether p-values are uniformly distributed
+# Two-ROC
+two.ks.train <- test_tibble %>%
+  dplyr::filter(train_or_test=="train") %>%
+  dplyr::select(p.value) %>%
+ks.test("punif", alternative = "g") %>% 
+  tidy() %>%
+  add_column(train_or_test="train")
+
+two.ks.test <- test_tibble %>%
+  dplyr::filter(train_or_test=="test") %>%
+  dplyr::select(p.value) %>%
+ks.test("punif", alternative = "g") %>% 
+  tidy() %>%
+  add_column(train_or_test="test")
+
+two.ks.tibble <- rbind(two.ks.train, two.ks.test) %>%
+  dplyr::select(-method, -alternative) %>%
+  dplyr::mutate(train_or_test = dplyr::recode(train_or_test,
+                                       train="Train",
+                                       test="Test")) %>%
+  dplyr::rename("Test Statistic" = statistic,
+                "P-value" = p.value,
+                "Data"=train_or_test)
+
+
+```
+
+# Background & Introduction
+
+Northern Wisconsin walleye (*Sander vitreus*) are vital to numerous economic, recreational, and cultural activities in the state, particularly in the Ceded Territory occupied by the Lake Superior Chippewa Tribes. To maintain walleye populations, the Wisconsin Department of Natural Resources (WDNR) sets yearly "safe harvest" levels on a lake-by-lake basis "such that the risk of
+exceeding 35% exploitation [...] is less than 1-in-40" [@Rep2016]. WDNR currently estimates walleye populations via mark-recapture electrofishing and the Chapman-modified Petersen Estimator [see @Rep2016, *pp. 5*], and these estimates are used to set safe harvest limits for the next two years. However, not all lakes can be sampled every three years, and walleye populations for these lakes are estimated using a log-linear mixed-effects regression model [for details, refer to @Rep2016, *pp. 8*]. I propose a supplement to these estimation methods based on the age-0 (known as young-of-the-year, or YOY) walleye sustainability threshold identified in Hansen et al. [-@Hansen2015a; -@Hansen2015b], who identify an electrofishing survey recruitment rate of 6.2 YOY walleye per km of shoreline as the critical threshold for walleye population sustainability. In particular, I use Monte Carlo simulations to assess the discriminatory capabilities of a binomial generalized linear mixed-effects model in predicting Hansen et al.'s [-@Hansen2015a; -@Hansen2015b] recruitment classifier with receiver operating characteristic (ROC) curves. I also consider a fixed-effects generalized linear model in which lake-specific random effects are proxied by limnological parameters. I find that both of these models offer meaningful predictive power, though the mixed-effects model out-performs the fixed-effects model.
+
+# Data
+
+I collected data on YOY walleye recruitment rates in Wisconsin's Ceded Territory by downloading all Ceded Territory fishery assessment reports found on the WDNR website [@WDNRSumm]. From this, I created a `.csv` file with the following data on each lake-year:
+
+* the number of YOY recruited and rate of recruitment (given as YOY per shoreline mile), 
+* the number of shoreline miles surveyed, 
+* the temperature at which the survey was conducted (in degrees F), 
+* the lake's name and unique ID number, and 
+* the year of survey. 
+
+To reflect the fact that my proposed model would only be used when a lake's population estimates were more than two years old, I only recorded data for lakes that had not been surveyed for the two years prior to data collection for the most recent (2017--2018) report; that is, only surveys from 2014 and earlier.
+
+I supplemented the lake-year data with limnological data from Papes and Zanden [-@WaterData]. Specifically, I included:
+
+* the size of each lake (in acres); 
+* the maximum depth of each lake (in meters); 
+* a classifier for each lake based on how water enters it (seepage, spring, or drainage); 
+* Secchi satellite depth (a quantitative water clarity measurement based on the maximum depth in meters at which a disk can be seen by a satellite when dropped in the lake); 
+* and the water's conductivity (in micro Seimens per centermeter).
+
+Hansen et al. [-@Hansen2015a] notes that surveys in very low-clarity bodies of water, or which are conducted at temperatures below 10 degrees C or above 21 degrees C, can yield unreliable counts of YOY walleye. Based on the Secchi sattelite water clarity categories found in Brezonik et al. [-@Clarity] and the survey temperatures given in the WDNR reports, 55 observations were removed from the data set due to these reliability concerns. The final data set contained 114 lake-year observations ranging from 1996 to 2014 (no data were available for 1997--1999, however), including 77 unique lakes.
+
+# Model
+
+Two models were fit, which I will call the fixed-effects (FE) model and the mixed-effects (ME) model. The ME model was based on the log-normal models found in WDNR's annual Ceded Territory fishery assessment reports. In that spirit, the model included a fixed effect for the natural logarithm of lake size (in acres) and a random effect for each lake. There are two differences between my ME model and the log-normal WDNR model. First, because the ME model is not intended to estimate mean walleye \textit{population} (as is the case for WDNR's log-linear model), but rather to predict the whether YOY walleye are \textit{sampled} ("recruited") at a rate indicating sustainability, I additionally control for the effect of survey temperature due to the effect it has on sampling rates [@Hansen2015a]. Further, I included a quadratic fixed-effect term for survey year (in addition to the linear term in the WDNR model) in order to account for changes in the overall trend of walleye recruitment; the included random (lake) effects in part address concerns about autocorrelation, and any residual autocorrelation was not statistically significant <!--because sampling of individual lakes is inconsistent (there are often irregular multi-year gaps between samples of a given lake) it struck me as theoretically unsound to attempt to model the autocorrelation between lake-years using, for example, an explicit time series model-->. Further details of the ME model, including explicit model notation, are given in Appendix I; model diagnostics are assessed in Appendix II.
+
+The FE model includes the same fixed effects as the ME model---the natural logarithm of lake size (in acres), survey temperature, and linear and quadratic terms for survey year---in addition to fixed-effect proxies for lake-specific effects that are likely to be captured in the ME model's lake random effect. These are the lake's maximum depth (in meters), which is a proxy for its carrying capacity; the lake's conductivity (in micro Seimens per centermeter), which measures the solids dissolved in a lake and hence is a proxy for its nutrient density; and an interaction between lake type (determined by how water enters the lake) and Secchi satellite depth (in meters), since different hydraulic classes result in different water clarity levels, which in turn affect the amount of sunlight that can reach flora and fauna. Further details of the FE model, including explicit model notation, are given in Appendix I, with model diagnostics being presented in Appendix II.
+
+Note that the purpose of this report is not to assess the relationship between these predictor variables and the probability that YOY recruitment is successful.Temperature, water clarity, lake type, conductance, acreage and maximum depth were chosen because they have well-established relationships with YOY recruitment [see, e.g., @HansenBayes; @Hansen2017; @Sch2005; @Nate2001]. Rather, the goal is to determine how effective a model using some combination of these predictors is at predicting whether YOY in a given lake will have a successful recruitment. As such, I will pay little attention to evaluating or interpreting model parameters directly.
+
+# Analysis
+
+It is worth setting out the motivation for testing the accuracy of the models using receiver operating characteristic (ROC) curves. Simply put, even though the dataset contains a balanced successful/unsuccessful recruitment ratio, it is likely that the ratio is unbalanced across all lakes. This is even more likely when accounting for the presence of unreliable surveys, which were removed from the dataset for this analysis. Mere accuracy is not enough for a model to be worth considering when successes and failures are unbalanced in the population; given a different dataset with proportion of successful recruitments $p$, naively guessing that a recruitment was successful (if $p>0.5$) or unsuccessful (if $p<0.5$) will yield better-than-random accuracy. ROC curves plot the cumulative true positive rate ("sensitivity") against the cumulative true negative rate ("specificity") for the model, and the resulting curve can be thought of as the model's power as a function of its type I error. That is, ROC curves measure the probability of detecting true positives with respect to the probability of detecting false positives. The area under the ROC curve (AUC) corresponds to the probability that the model will assign a random true positive response a predicted probability of being a success higher than a random true negative response, reflecting how well the model discriminates between the two. The table below more explicitly shows what ROC curves measure.
+
+\begin{table}[!h]
+\begin{minipage}{0.6\textwidth}
+\begin{tabular}{|c || c c|}
+\multicolumn{3}{c}{~~~~~~~~~~~~~~~~~~~~~\textit{Recruitment Outcome}}  \\ \hline
+\textit{Truth} & Successful & Unsuccessful\\
+\hline
+Above Threshold & True Positive (TP) & False Negative (FN) \\
+Below Threshold & False Positive (FP) & True Negative (TN) \\
+\hline
+\end{tabular}
+\caption{Recruitment Versus "True" YOY Level Classifications}
+\end{minipage}
+\begin{minipage}{0.3\textwidth}
+\vspace{-.5cm}
+\begin{align*}
+\text{True Neg. Rate} = \frac{TN}{FP+TN}&\\
+\text{True Pos. Rate}=\frac{TP}{TP+FN}&
+\end{align*}
+\end{minipage}
+\end{table}
+
+A Monte Carlo simulation of 1000 ROC curves were used to assess the two models' discriminatory capacities (certain details left for Appendix III). For each iteration, the model was randomly divided into training and testing datasets with a 70/30 split. Both models were fit on the training dataset. Each model was used to predict the probability of successful recruitment on both the training and testing datasets (separately). Then, ROC curves were fit for each model's predictions on each dataset, resulting in four ROC curves. In order for the models to meaningfully improve on random guessing, they have to out-perform the baseline true positive rate, which happened to be exactly 0.5 in the full dataset. In other words, the models are worth considering if they perform measurably better than a coin flip. These ROC curves are shown below.
+
+```{r roc-curves, echo=F, message=F, error=F, results='hide', warning=F, fig.align="center", fig.cap="ROC Curves for ME and FE Models on Training and Test Data Sets."}
+# Plot ROC by FE/ME and train/test
+p_roc_curves <- ggplot(data=roc_tibble,
+       aes(x=(1-mean_spec), y=mean_sens,
+           fill=FE_or_ME,
+           linetype=train_or_test)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=L_sens, ymax=U_sens), alpha=0.5) +
+  stat_function(fun=punif, lty=3) +
+  labs(title="ROC by Model and Dataset",
+       x="(1-Mean Specificity)",
+       y="Mean Sensitivity") +
+  scale_fill_manual(values=ggplotColours(n=2),
+                    labels=c("Fixed", "Mixed"),
+                    name="Model") +
+  scale_linetype_manual(values=c(1, 2),
+                        labels=c("Test", "Train"),
+                        name="Data") +
+  guides(linetype=guide_legend(override.aes = 
+                                 list(fill=NULL, colour = NULL))) +
+  theme_general
+
+p_roc_curves
+```
+
+<!--\begin{figure}[!htb]
+\begin{center}
+\includegraphics[width=1.4\textwidth, height=2.8in]{roc_curves.jpg}
+\caption{ROC Curves for ME and FE Models on Training and Test Datasets}
+\end{center}
+\end{figure}-->
+
+Two sets of questions arise about these ROC curves. First, which model--dataset combinations produce AUC values significantly larger than the AUC of a "naive guess" ROC curve (in other words, a diagonal line with a slope of one)? Second, within a given dataset, is there a significant difference between the two models' AUCs? These correspond to the ability for a given model to predict whether a given recruitment will be successful, and the difference between two models' capacities to predict the same thing, respectively.
+
+To answer the first set of questions, the modified Mann--Whitney $U$ test for ROC curves detailed by Mason and Graham [-@Mason] was performed for each curve during each iteration. In short, this test is based on the fact that ROC curves act as rankings for predicted probabilities ("scores"); in better-than-random ROC curves, high scores should correspond to successful recruitments. Under the null hypothesis, a given ranked score should have equal probability of belonging to a successful or unsuccessful recruitment; this correspsonds to an ROC curve unable to separate the two classes of recruitment. The null distribution of the p-values for the Mann--Whitney $U$ test is a standard uniform distribution, and this was tested for each model--dataset combination via a one-sample Kolmogorov-Smirnov test for the equality of distributions. The alternative hypothesis for the Kolmogorov-Smirnov tests was that the empirical distribution function of the p-values lies above a standard uniform cumulative distribution function. In short, rejecting the null hypothesis here means that the $U$ tests produced substantially more small p-values than expected if the p-values were uniformly distributed. This, in turn, would provide evidence that the ROC curves distinguished true successful recruitments from true unsuccessful recruitments at a rate significantly higher than naive guessing.
+
+<!--
+Assumption: Independent obs. 
+Violations:
+1. Time independence: lack of autocorrelation solves
+2. Lake independence: Lake RE and random sampling/splitting mitigate, Mason and Graham suggest the test is at least somewhat resilient to this
+-->
+
+To answer the second set of questions, a paired test for difference in AUC between the two models' ROC curves was conducted for each dataset (training and testing) in accordance with Hanley and McNeil [-@Hanley]; the ROC were tested as paired because their predictions shared the same data. The test statistic is asymptotically normally distributed, and the p-values for each test were found using this result. The variance component of the test statistic for each iteration of the test was obtained via bootstrap (for further details, see Appendix III). The alternative hypothesis was that the difference in AUC ($ME-FE$) was greater than zero, or that the ME model outperforms the FE model. If the proxies for lake-specific effects in the FE model are insufficient to capture the information in the lake random effects coefficients, we should expect that to be the case. Under the null hypothesis of no difference in AUC, the p-values are uniformly distributed between 0 and 1. The distribution of the p-values was tested with a one-sample Kolmogorov-Smirnov test for the equality of distributions as detailed above.
+
+# Results
+
+The distribution of p-values for the 1000 Mann--Whitney $U$ tests is given below. Also shown is a plot showing the empirical distribution function of the p-values with the cumulative distribution function of a standard uniform distribution.\footnote{Note that the empirical distribution function for the training data is omitted from the second graph, as it is merely an uninformative vertical line at $x=0$.} ^[Confidence intervals for the empirical distribution functions calculated using the Dvoretzky--Kiefer--Wolfowitz inequality found in Dvoretzky et al. [@ECDF].] As expected, both models always yield better-than-random discrimination between successful and unsuccessful recruitments for the training data; this is an uninteresting and obvious result, but it is included here for reference. The distribution of p-values for both models on the test set is also visibly non-uniform, as was confirmed by the results of the Kolmogorov-Smirnov tests, given in the table below. Note that the p-values are all \textit{approximately} zero, due in large part due to the sample size ($B=1000$ for each test).
+
+```{r one, echo=F, message=F, error=F, results='hide', warning=F, fig.align="center", fig.cap="Top: Distribution of Mann--Whitney U Test P-Values by Test and Dataset. Bottom: Empirical and Theoretical Cumulative Distribution Functions for Mann--Whitney U Test P-Values by Model."}
+
+# Distribution of roc.area() p-values (One-ROC test)
+one_test_p <- one_test_tibble %>%
+  mutate(ME_or_FE=recode_factor(ME_or_FE,
+                                "ME"="Mixed", 
+                                "FE"="Fixed")) %>%
+ggplot(aes(p.value, fill=train_or_test)) +
+  geom_histogram(alpha=0.5, position="identity") + 
+  theme_general +
+  labs(title="Distribution of ROC Test P-Values",
+       x="P-value", y="Frequency") +
+  scale_fill_manual(values=ggplotColours(n=2),
+                    labels=c("Test", "Train"),
+                    name="Data") +
+  facet_grid(ME_or_FE~.)
+
+# ECDF - one-ROC test
+ecdf_one_test <- one_test_tibble %>%
+  group_by(ME_or_FE) %>%
+  mutate(e_c = ecdf(p.value)(p.value))
+
+mx_dif_one <- ecdf_one_test %>% 
+  group_by(ME_or_FE) %>%
+  slice(which.max(abs(ecdf(p.value)(p.value)-punif(p.value))))
+mx_dif_one[1,8] <- mx_dif_one[1,8]-.113
+mx_dif_one[2,8] <- mx_dif_one[2,8]-.08
+
+eps_one <- sqrt((1/(2*nrow(one_test_tibble)))*log(2/0.05))
+
+one_test_ecdf_p <- ecdf_one_test %>%
+  dplyr::filter(train_or_test=="test") %>%
+ggplot(aes(x=p.value, col=ME_or_FE)) +
+      geom_step(stat="ecdf") +
+      geom_ribbon(aes(x=p.value, 
+                      ymin=pmax(..y..-eps_one, 0), 
+                      ymax=pmin(..y..+eps_one, 1),
+                      fill=ME_or_FE),
+                  stat="ecdf", alpha=0.3, lty=0,
+                  show.legend = F) +
+      theme_general +
+      stat_function(fun=punif, lty=3,
+                    col="black",
+                    show.legend = F) +
+      labs(title = "U-Test P-Values on Test Dataset by Model",
+           subtitle = "ECDFs vs. CDF with Maximum Vertical Difference",
+           x="P-value", y="Cumulative Density") +
+  geom_segment(data=mx_dif_one,
+                 aes(x = p.value, xend=p.value,
+                     yend=e_c,
+                     y=qunif(p.value),
+                     col=ME_or_FE), lty = 2) +
+  scale_color_manual(values=ggplotColours(n=2),
+                     labels=c("Fixed", "Mixed"),
+                     name="Model") +
+  scale_linetype_manual(values=c(1, 3, 2),
+                        labels=c("ECDF", "Theoretical CDF",
+                                 "Maximum Difference")) +
+  xlim(c(0, 1))
+
+plot_grid(one_test_p, one_test_ecdf_p, nrow=2,
+          rel_heights = c(3/7, 4/7))
+```
+
+<!--\begin{figure}[!htb]
+\begin{center}
+\includegraphics[width=1.3\textwidth, height=4in]{one.jpeg}
+\caption{Top: Distribution of Mann--Whitney U Test P-Values by Test and Dataset. Bottom: Empirical and Theoretical Cumulative Distribution Functions for Mann--Whitney U Test P-Values by Model.}
+\end{center}
+\end{figure}-->
+
+```{r kab, echo=F, results='asis'}
+kableExtra::kable(ks.tibble[,c(4, 3, 1, 2)],
+                  booktabs = TRUE,
+                  format = "html", table.attr = "style='width:50%;'",
+                  caption="Kolmogorov-Smirnov Test Statistics and P-Values for Mann-Whitney U Tests") %>%
+  kable_styling("basic")
+```
+
+The results of the Kolmogorov-Smirnov tests show that both models outperform naive guessing, both on the training set---an unsurprising result---and on the test set. This means, directly, that the distribution of the p-values for the Mann-Whitney $U$ tests were disproportionately small relative to the assumed null uniform distribution. This further implies that the Mann-Whitney $U$ tests found substantial evidence in support of the models' discriminatory capabilities for novel data and, in turn, provides substantial evidence that both the FE and ME models can meaningfully predict whether a novel recruitment will be successful or unsuccessful. This result suggests that the models outlined in this report can meaningfully supplement existing WDNR walleye population models, a discussion which will be fleshed out in the next section.
+
+Similar results were found for the paired AUC difference tests. The distribution of p-values for these tests, along with a plot of the tests' empirical distribution functions are given below. This is followed by a similar table of Kolmogorov-Smirnov test results. Recall that the p-values shown are all \textit{approximately} zero given the large sample of bootstraps ($B=1000$ for each test).
+
+```{r two, echo=F, message=F, error=F, results='hide', warning=F, fig.align="center", fig.cap="Top: Distribution of Paired AUC Difference Test P-Values by Dataset. Bottom: Empirical and Theoretical Cumulative Distribution Functions for Paired AUC Difference Test P-Values by Dataset."}
+# Distribution of roc.test() p-values (Two-ROC test)
+auc.test.p <- ggplot(data=test_tibble,
+       aes(p.value, fill=train_or_test)) +
+  geom_histogram(alpha=0.5, position="identity") + 
+  theme_general +
+  labs(title="Distribution of Paired AUC Difference Test P-Values",
+       x="P-value", y="Frequency") +
+  scale_fill_manual(values=ggplotColours(n=2),
+                    labels=c("Test", "Train"),
+                    name="Data")
+
+# ECDF - two-ROC test
+ecdf_two_test <- test_tibble %>%
+  group_by(train_or_test) %>%
+  mutate(e_c = ecdf(p.value)(p.value))
+
+mx_dif_two <- ecdf_two_test %>% 
+  group_by(train_or_test) %>%
+  slice(which.max(abs(ecdf(p.value)(p.value)-punif(p.value))))
+
+eps_two <- sqrt((1/(2*nrow(test_tibble)))*log(2/0.05))
+
+p <- ggplot(aes(x=p.value, col=train_or_test),
+            data=ecdf_two_test) +
+      geom_step(stat="ecdf") +
+      geom_ribbon(aes(x=p.value, 
+                      ymin=pmax(..y..-eps_two, 0), 
+                      ymax=pmin(..y..+eps_two, 1),
+                      fill=train_or_test),
+                  stat="ecdf", alpha=0.3, lty=0,
+                  show.legend = F) +
+      theme_general +
+      stat_function(fun=punif, lty=3, 
+                    col="black", 
+                    show.legend = F) +
+      labs(title = "Paired AUC Difference Test P-Values by Dataset",
+           subtitle = "ECDFs vs. CDF with Maximum Vertical Difference",
+           x="P-value", y="Cumulative Density") +
+      geom_segment(data=mx_dif_two,
+                 aes(x = p.value, xend=p.value,
+                     yend=e_c,
+                     y=qunif(p.value),
+                     col=train_or_test), lty = 2) +
+  scale_color_manual(values=ggplotColours(n=2),
+                     labels=c("Test", "Train"),
+                     name="Data")+
+  scale_linetype_manual(values=c(1, 3, 2),
+                        labels=c("ECDF", "Theoretical CDF",
+                                 "Maximum Difference"))
+
+plot_grid(auc.test.p, p, nrow=2,
+          rel_heights = c(2/5, 3/5))
+```
+
+<!--\begin{figure}[!htb]
+\begin{center}
+\includegraphics[width=7in, height=3.1in]{two.jpeg}
+\caption{Top: Distribution of Paired AUC Difference Test P-Values by Dataset. Bottom: Empirical and Theoretical Cumulative Distribution Functions for Paired AUC Difference Test P-Values by Dataset.}
+\end{center}
+\end{figure}-->
+
+\newpage
+
+```{r kab2, echo=F, results='asis'}
+kableExtra::kable(two.ks.tibble[,c(3, 1, 2)],
+                  booktabs = TRUE,
+                  format = "html", table.attr = "style='width:30%;'",
+                  caption="Kolmogorov-Smirnov Test Statistics and P-Values for Paired AUC Difference Tests") %>%
+  kable_styling("basic")
+```
+
+On the training data, the ME model clearly outperforms the FE model. This is perhaps another unsurprising result; the limited number of proxies for lake-specific effects in the FE model provide less information than the random effects themselves. On the test data, the distribution of p-values is less clear, though there is a moderate clustering of p-values in the region between 0 and 0.25, and the Kolmogorov-Smirnov test provides evidence to reject the hypothesis of uniformly distributed p-values in favor of the alternative that there are significantly more small p-values than expected. The implication here, then, is that while the ME model outperforms the FE model somewhat consistently on the test data, the size of this effect is minor to moderate for any given set of predictions, and is thus only detectable when considering a large number of predictions.
+
+# Dicussion & Conclusion
+
+The results of the Monte Carlo simulations provide strong evidence in favor of both models' ability to distinguish between successful and unsuccessful YOY recruitments. The models both consistently produced ROC curves with far better-than-random predictive accuracy, and their AUCs were overall far above those of naive guessing. Though the RE model, on average, was stronger overall, even the relatively simple FE model performed well. Thus, the models outlined in this report could prove to be valuable supplements to WDNR's existing predictive modeling. Specifically, the RE model could supplement the log-normal model currently used for lakes that have not been sampled in over two years, or to improve tracking of walleye in lakes sampled with higher frequencies. One potentially fruitful option is use of either models' predicted probabilities ("scores") as part of a mixture model. Mixture models have been used to model the populations of species that are elusive [@Mix3] or which have highly variable population densities [@Mix4], including when sampling is inconsistent [@Mix1] or the species has highly cyclical recruitment cycles [@Mix2]. One such possible use of the models outlined here is to model Wisconsin's lakes as a probabilistic mixture of two populations: lakes with unsuccessful YOY recruitment, which are at-risk for declining walleye populations, and those with successful recruitment. This binary classifier offers a middle ground between granular lake-specific predictions and broader, population-based trend analysis.
+
+# References
+
+<div id="refs"></div>
+
+# Appendix I: Model Specification
+
+## Fixed Effects Model
+
+\begin{align*}
+ln\left( \frac{\pi_{i}}{1-\pi_{i}} \right) &= [\mu + \sum_{j=1}^{3} \gamma_j \mathbf{1}_{(\text{Lake type}_i = j)}] + \beta_1 ln(\text{Acreage}_i)+ \beta_2 \text{(Survey Temperature)}_i  \\
+&\qquad+ \beta_3 \text{(Years after 1990)}_i + \beta_4 \text{(Years after 1990)}^2_i + \beta_5 \text{(Max Depth)}_i \\
+&\qquad+ \beta_6 (\text{Secchi depth}_i) + \sum_{j=1}^{3} \theta_j [(\text{Secchi depth}_i) \times \mathbf{1}_{(\text{Lake type}_i = j)}]
+\end{align*}
+
+## Mixed Effects Model
+
+\begin{align*}
+ln\left( \frac{\pi_{i\ell}}{1-\pi_{i\ell}} \right) &= [\mu + \alpha_\ell] + \beta_1 ln(\text{Acreage}_i) + \beta_2 \text{(Survey Temperature)}_i\\
+&\qquad + \beta_3 \text{(Years after 1990)}_i + \beta_4 \text{(Years after 1990)}^2_i\\
+\alpha_\ell \sim N(0, \sigma^2_\ell)
+\end{align*}
+
+Here, $\pi_{i}$ (and $\pi_{i\ell}$) is the probability that YOY recruitment $i$ (in lake $\ell$) is successful, and the left-hand side of both equation is referred to as the log-odds of successful recruitment. The $\mu$ coefficient is the overall intercept in each model, though the models have different ways of accounting for the varied intercepts across lakes. The $\gamma_j$ coefficients in the FE model represent the difference in log-odds between lake type $j$ ($j=1$ for drainage lakes, $j=2$ for seepage lakes, $j=3$ for spring lakes, with $\gamma_1=0$). The indicator \(\mathbf{1}_{(\text{Lake type}_i = j)}]\) take value 1 when lake $i$ has lake type $j$ and 0 otherwise. Thus, in the FE model, $mu$ is the log-odds of successful recruitment in a drainage lake when every other independent variable is zero, and the sum of $\mu$ and lake $i$'s lake type $\gamma$ are that lake's intercept. In the ME model, the $\alpha_\ell$ are random terms that reflect the deviation of lake $\ell$ from the overall intercept; they have mean zero and a constant variance $\sigma^2_\ell$. 
+
+The remaining terms are all slope terms, meaning they represent the change in log-odds of successful recruitment for observation $i$ when the respective independent variable changes by one unit and all other variables are held constant, except for $\beta_4$, which represents the change in log-odds for a change of years$^2$. In the case of $\beta_1$, the coefficient represents the change in log-odds when log-acreage changes by one unit. The final set of terms in the FE model deal with the Secchi satellite depth of observation $i$. The $\beta_6$ slope is the change in log-odds of successful recruitment when Secchi depth increases by one meter for a drainage lake and the other variables are held constant. The $\theta_j$ coefficients are the differences in slope for Secchi depth for observation $i$ between a drainage lake and lake type $j$ ($j=1$ for drainage lakes, $j=2$ for seepage lakes, $j=3$ for spring lakes, with $\theta_1=0$). 
+
+
+# Appendix II: Model Diagnostics
+
+Model assumptions were checked using the 'full' dataset on each model; although theoretically each of the 1000 models should be checked, there is no efficient way to do so, and it is reasonable to assume that if the 'full' models meet assumptions, that the models in each of the simulations are reasonably likely to meet assumptions. Model assumption checks and diagnostics were performed using the `DHARMa` `R` package, which "uses a simulation-based approach to create readily interpretable scaled (quantile) residuals" for linear models, including generalized linear models and mixed models [@DHARMa]. In short, each observation is independently simulated using the fitted model, and each observation's residual is defined as the value of the observation's simulated empirical distribution function (the distribution of simulated residuals) at the observed value. The resulting residuals are thus scaled from the distribution proscribed by the model's functional form to a standard uniform distribution under the null hypothesis that the model is correctly specified. This makes violated assumptions easy to spot, as well as creating diagnostic plots that are easily interpreted and comparable across model structures and distributional assumptions.
+
+## Fixed Effects Model
+
+The plot below shows the quantile-quantile plot based on the scaled residuals simulations for the FE model. A correctly specified model should have a straight diagonal line from bottom-left to top-right, which corresponds to a standard uniform distribution of scaled residuals. The test performed to determine whether this assumption was met was a Kolmogorov-Smirnov test ($H_0:$ The empirical CDF of the scaled residuals is a standard uniform CDF vs. $H_1:$ The empirical CDF lies above or below the CDF of a standard uniform). The test yielded $p=0.86$, which means there is insufficient evidence to conclude that the model is misspecified based on the distribution of the scaled quantiles.
+
+```{r KS FE, echo=F, message=F, results='hide', fig.width=5, fig.height=3.5, fig.cap="QQ Plot of Residuals for FE Model"}
+simulationOutput1 <- simulateResiduals(b)
+
+plotQQunif(simulationOutput1)
+
+#testResiduals(simulationOutput1)
+
+#testQuantiles(simulationOutput1)
+
+```
+
+The next plot shows the scaled residuals vs. scaled fitted values plot for the FE model, along with horizontal dotted lines that indicate where the first through third quantiles (25\% quantile, median, and 75\% quantile) should be if the model is correctly specified. The solid horizontal lines are fitted quantile regression lines which, in short, represent the observed quantiles of the scaled residuals based on simulated regressions across the range of the scaled fitted values. To determine whether this assumption is met, I performed a simulated quantile regression test on the scaled residuals ($H_0:\cap_{\tau\in\mathrm{T}} ~q_{\tau}=q$ vs. $H_1:\cup_{\tau\in\mathrm{T}} ~q_{\tau}\neq q$ where $q_{\tau}$ is the $\tau$ quantile of the scaled residuals in $\mathrm{T}=\{0.25, 0.5, 0.75\}$). The resulting p-value, $p=0.67$, does not provide evidence that the model's scaled residual quantiles deviate from the expected quantiles of a well-specified model.
+
+```{r Res FE, echo=F, message=F, results='hide', fig.height=3.5, fig.cap="Residuals vs. Fitted Values and Quantile Regression Lines for FE Model"}
+plotResiduals(simulationOutput1)
+```
+
+Finally, the figure below shows the scaled residuals plotted over time, as well as the autocorrelation factor for different lags, which represents the amount of correlation between observations across time periods of different lengths. A Durbin-Watson test^[Although the Durbin-Watson test is designed for normally distributed residuals, Hartig notes "[i]n simulations, I didn't see a problem with this [scaled residuals] setting" [-@DHARMa_temp].] did not suggest significant temporal autocorrelation among the scaled residuals ($H_0:\rho =0$ vs. $H_1:\rho \neq 0$ where $\rho$ is the autocorrelation between the mean scaled residual for observations at time $t$ and time $t-1$ for each $t$, $p=0.47$). I was somewhat concerned about the ACF for a lag of 5 years, but this merely corresponds to the mean periodicity of walleye recruitment and is likely not particularly concerning for overall model quality [@Rep2016, *pp. 38*].
+
+```{r AC FE, echo=F, message=F, results='hide', fig.height=3.5, fig.cap="Autocorrelation and Residuals by Year After 1990 in FE Model"}
+
+rb <- recalculateResiduals(simulationOutput1, group=fish_sc$s_year)
+testTemporalAutocorrelation(rb, time=unique(fish_sc$s_year))
+```
+
+## Mixed Effects Model
+
+The plots in this section are the ME model analogues of the plots shown above. As such, I will merely report the hypotheses and p-values of the relevant tests. None of the tests or diagnostic plots provided strong evidence that model assumptions were violated.
+
+Kolmogorov-Smirnov test---$H_0:$ The empirical CDF of the scaled residuals is a standard uniform CDF vs. $H_1:$ The empirical CDF lies above or below the CDF of a standard uniform. P-value: $p=0.897$.
+
+Quantile location test---$H_0:\cap_{\tau\in\mathrm{T}} ~q_{\tau}=q$ vs. $H_1:\cup_{\tau\in\mathrm{T}} ~q_{\tau}\neq q$ where $q_{\tau}$ is the $\tau$ quantile of the scaled residuals in $\mathrm{T}=\{0.25, 0.5, 0.75\}$. P-value: $p=0.94$.
+
+Durbin-Watson test---$H_0:\rho =0$ vs. $H_1:\rho \neq 0$. P-value: $p=0.74$.
+
+```{r KS ME, echo=F, message=F, results='hide', fig.height=3.5, fig.cap="QQ Plot of Residuals for ME Model"}
+simulationOutput2 <- simulateResiduals(b2)
+
+plotQQunif(simulationOutput2)
+
+#testResiduals(simulationOutput2)
+
+#testQuantiles(simulationOutput2)
+
+```
+
+```{r Res ME, echo=F, message=F, results='hide', fig.height=3.5, fig.cap="Residuals vs. Fitted Values and Quantile Regression Lines for ME Model"}
+plotResiduals(simulationOutput2)
+```
+
+```{r AC ME, echo=F, message=F, results='hide', fig.height=3.5, fig.cap="Autocorrelation and Residuals by Year After 1990 in ME Model"}
+r2b <- recalculateResiduals(simulationOutput2, group=ft$s_year)
+testTemporalAutocorrelation(r2b, time=unique(ft$s_year))
+```
+
+# Appendix III: Monte Carlo Algorithm
+
+The following procedure outlines how each of the 1000 Monte Carlo simulations were carried out. A seed was set before the simulation in order to make results replicable.
+
+1. Randomly sample 80 integers between 1 and 114 without replacement. Select these 80 rows from the full dataset. These 80 rows of data (70.02\%) were used for the training set. The remaining 34 were used for the testing (or validation) set.
+2. Fit both models (FE and ME) as specified in Appendix I on the training set.
+3. Calculate predicted probabilities ("scores") for both models on both datasets.
+
+   (a) For the training set, the models' fitted values (back-transformed into  probabilities) were used.
+   (b) For the test set, the models fit on the training data were used to calculate  predicted probabilities.
+
+4. Using these predicted scores, fit separate ROC curves for each model--dataset combination. **(1)** Calculate AUC for each. **(2)**
+5. Perform modified Mann--Whitney $U$ tests on each model--dataset ROC curve. **(3)**
+6. For each dataset, perform paired difference in AUC test on both models. **(4)**
+7. Add **(1)**, **(2)**, **(3)**, and **(4)** to `R` list objects.
+
+After all iterations were completed, the lists containing **(1)**, **(2)**, **(3)**, and **(4)** were returned and used for subsequent analysis.
+
+<!-- Under the null hypothesis the two sets of scores (successful and unsuccessful recruitments) come from the same distribution, so a given ranked score should have equal probability of belonging to a successful or unsuccessful recruitment. In other words, the null hypothesis is that the ROC curve is unable to separate the two classes of recruitment. The test statistic ($U$) is the difference between the total ranks of successes in the fitted ROC curve and the minimum possible total ranks. For large samples (roughly $n>20$), $U$ has an approximate normal distribution under the null hypothesis, and the test's p-value is calculated using this normal approximation.
+
+
+This test looks at whether an empirical distribution function---which maps the proportion of sample observations less than or equal to all values between the smallest and largest observations [@ECDF]---is sufficiently close to the cumulative distribution function of a reference distribution. The Kolmogorov-Smirnov test statistic $D_k$ here is the magnitude of the largest vertical distance between the empirical distribution function of the bootstrapped p-values and the cumulative distribution function of a standard uniform distribution. Under the null hypothesis of no difference in distribution, $D_k$ follows a Kolmogorov distribution, the details of which are omitted here [see, e.g., @Wang]. 
+
+
+The methodology for this test was as follows. First, 2,000 stratified resamples were taken from the testing dataset with replacement, each containing the same number of successful and unsuccessful recruitments as the original data on which the ROC curve was fit. Then, the two ROC curves were re-fit by comparing the resampled predicted probabilities to the corresponding responses in the original data, and AUCs were computed for the new curves. The test statistic is standardized difference of the two curves was calculated as $D_{ROC}=\frac{AUC_{ME}-AUC_{FE}}{S}$ where $AUC_{ME}$ and $AUC_{FE}$ are the original ROC curves' AUC, and $S$ is the standard deviation of the differences between the AUCs of all bootstrap resamples. The p-value for the observed $D_{ROC}$ was obtained using the asymptotic distribution of $D_{ROC}$ under the null hypothesis of no difference between the two ROC curves, which is a standard normal distribution [@Hanley]. -->
